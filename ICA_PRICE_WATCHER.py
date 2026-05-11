@@ -1,153 +1,298 @@
 import requests
-import json
+from bs4 import BeautifulSoup
 from datetime import datetime
+import json
+import time
+import sys
 
-# Mock-lista med ICA-butiker i Skåne (baserat på verkliga data; ~150 totalt, här ett urval för demo)
-# I verklig kod: Hämta från https://www.ica.se/api/stores?region=skane
+# Store IDs for ICA — these are the numeric IDs used in the ICA website URLs
+# Find your store's ID by visiting ica.se/butiker and checking the URL
 SKANE_STORES = {
-    "lund": {
-        "1": {"name": "ICA Tuna Lund", "id": "tuna-lund"},
-        "2": {"name": "ICA Kvantum Lund", "id": "lund-kvantum"},
-        "3": {"name": "ICA Supermarket Mårten", "id": "lund-marten"},
-        "4": {"name": "ICA Nära Nova Lund", "id": "lund-nova"},
-        "5": {"name": "ICA Nära Värpinge", "id": "lund-varpinge"}
+    "Lund": {
+        "ICA Maxi Lund": "01018",
+        "ICA Kvantum Lund": "01452",
+        "ICA Supermarket Mårten": "03451",
+        "ICA Nära Nova Lund": "06202",
     },
-    "malmo": {
-        "1": {"name": "ICA Maxi Malmö", "id": "malmo-maxi"},
-        "2": {"name": "ICA Kvantum City Malmö", "id": "malmo-kvantum"},
-        "3": {"name": "ICA Supermarket Triangeln", "id": "malmo-triangeln"},
-        "4": {"name": "ICA Nära Möllevången", "id": "malmo-mollevangen"},
-        "5": {"name": "ICA Nära Limhamn", "id": "malmo-limhamn"}
+    "Malmö": {
+        "ICA Maxi Malmö": "01081",
+        "ICA Kvantum City Malmö": "01208",
+        "ICA Supermarket Triangeln": "03307",
+        "ICA Nära Möllevången": "06389",
     },
-    # Lägg till fler orter: helsingborg, trelleborg, ystad osv. Totalt ~150 i Skåne.
-    # Full lista: Hämta från ICA:s API eller https://ica.jensnylander.com/butiker/karta
+    "Helsingborg": {
+        "ICA Maxi Helsingborg": "01024",
+        "ICA Supermarket Helsingborg C": "03199",
+    },
+    "Kristianstad": {
+        "ICA Maxi Kristianstad": "01040",
+        "ICA Kvantum Kristianstad": "01236",
+    },
 }
 
-def get_all_skanne_stores():
-    """Hämtar alla butiker i Skåne (mock; ersätt med API-anrop)"""
-    all_stores = {}
-    for city, stores in SKANE_STORES.items():
-        for num, store in stores.items():
-            all_stores[f"{city}-{num}"] = store
-    return all_stores  # Ca 150 i full version
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/html",
+    "Accept-Language": "sv-SE,sv;q=0.9",
+}
 
-def get_ica_deals(store_id):
-    # Live-API (avkommentera för riktigt data):
-    # url = f"https://handla.ica.se/api/weekly-offers/{store_id}"
-    # headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    # try:
-    #     response = requests.get(url, headers=headers)
-    #     return response.json().get("offers", [])
-    # except:
-    #     pass
-    
-    # Mock-data (realistiska deals för Skåne-butiker)
-    mock_deals = [
-        {"name": "Mjölk 1L Arla", "price": 12.90, "comparePrice": 18.90, "unit": ""},
-        {"name": "Kycklingfilé", "price": 29.90, "comparePrice": 0, "unit": "/kg"},
-        {"name": "Ägg 10-pack", "price": 22.90, "comparePrice": 0, "unit": ""},
-        {"name": "Bananer", "price": 14.90, "comparePrice": 0, "unit": "/kg"},
-        {"name": "Rågbröd ICA", "price": 9.90, "comparePrice": 0, "unit": ""},
-        {"name": "Yoghurt 500g", "price": 15.50, "comparePrice": 20.00, "unit": ""},
-        {"name": "Tomater", "price": 19.90, "comparePrice": 25.00, "unit": "/kg"}
-    ]
-    return mock_deals
 
-def print_top_deals(deals, store_name):
-    """Skriver ut top 5 deals"""
-    deals = sorted(deals, key=lambda x: (x.get("comparePrice", 0) - x.get("price", 0)), reverse=True)[:5]
-    print(f"\nTop 5 deals för {store_name}:")
-    for i, deal in enumerate(deals, 1):
-        name = deal.get("name", "Okänd vara")
-        price = deal.get("price", 0)
-        old_price = deal.get("comparePrice", 0)
-        unit = deal.get("unit", "")
-        was = f" (var {old_price} kr{unit})" if old_price > price else ""
-        print(f"{i}. {name} - {price} kr{unit}{was}")
+def get_offers_for_store(store_id, store_name):
+    """
+    Fetch weekly offers for a specific ICA store.
+    Uses ICA's internal API endpoint that the website itself calls.
+    """
+    url = f"https://www.ica.se/api/stores/{store_id}/weeklyoffers"
 
-def save_to_file(deals, store_name, filename):
-    """Sparar deals till fil"""
-    with open(filename, "w", encoding="utf-8") as f:
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            offers = data.get("offers", [])
+            return parse_offers(offers)
+        elif response.status_code == 404:
+            print(f"  Store ID {store_id} not found — check if the ID is correct")
+            return []
+        else:
+            # Fallback: try scraping the offers page directly
+            return scrape_offers_page(store_id, store_name)
+
+    except requests.exceptions.Timeout:
+        print(f"  Timeout fetching {store_name}")
+        return []
+    except requests.exceptions.ConnectionError:
+        print(f"  Connection error for {store_name}")
+        return []
+    except (ValueError, KeyError):
+        return scrape_offers_page(store_id, store_name)
+
+
+def scrape_offers_page(store_id, store_name):
+    """
+    Fallback: scrape the ICA offers page for a store using BeautifulSoup.
+    """
+    url = f"https://www.ica.se/butiker/erbjudanden/?storeId={store_id}"
+
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        offers = []
+
+        # ICA renders offer cards with these class names (may change if ICA updates their site)
+        offer_cards = soup.find_all("div", class_=lambda c: c and "offer" in c.lower())
+
+        for card in offer_cards:
+            name_el = card.find(class_=lambda c: c and "name" in c.lower())
+            price_el = card.find(class_=lambda c: c and "price" in c.lower())
+
+            if name_el and price_el:
+                offers.append({
+                    "name": name_el.get_text(strip=True),
+                    "price": price_el.get_text(strip=True),
+                    "compare_price": None,
+                })
+
+        return offers
+
+    except Exception as e:
+        print(f"  Scraping failed for {store_name}: {e}")
+        return []
+
+
+def parse_offers(raw_offers):
+    """Parse raw offer data from ICA's API into a clean list."""
+    parsed = []
+    for offer in raw_offers:
+        try:
+            parsed.append({
+                "name": offer.get("productName") or offer.get("name", "Okänd vara"),
+                "price": float(offer.get("price", 0)),
+                "compare_price": float(offer.get("comparePrice", 0)) or None,
+                "unit": offer.get("priceUnit", ""),
+                "condition": offer.get("offerCondition", ""),
+                "valid_until": offer.get("validUntil", ""),
+            })
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
+def calculate_savings(offer):
+    """Return how much you save on an offer, for sorting."""
+    price = offer.get("price", 0)
+    compare = offer.get("compare_price") or 0
+    if compare and compare > price:
+        return compare - price
+    return 0
+
+
+def print_offers(offers, store_name, top_n=5):
+    """Print the top N offers for a store, sorted by savings."""
+    if not offers:
+        print(f"  Inga erbjudanden hittades för {store_name}")
+        return
+
+    sorted_offers = sorted(offers, key=calculate_savings, reverse=True)[:top_n]
+
+    print(f"\nTop {top_n} erbjudanden — {store_name}:")
+    print("-" * 40)
+    for i, offer in enumerate(sorted_offers, 1):
+        name = offer.get("name", "?")
+        price = offer.get("price", "?")
+        compare = offer.get("compare_price")
+        unit = offer.get("unit", "")
+        condition = offer.get("condition", "")
+
+        price_str = f"{price} kr{unit}"
+        was_str = f" (ord. {compare} kr)" if compare and compare > price else ""
+        cond_str = f" — {condition}" if condition else ""
+
+        print(f"{i}. {name}: {price_str}{was_str}{cond_str}")
+
+
+def save_to_file(all_results, filename=None):
+    """Save results to a text file."""
+    if not filename:
         week = datetime.now().isocalendar()[1]
         year = datetime.now().year
-        f.write(f"ICA {store_name} – Erbjudanden vecka {week} {year}\n")
-        f.write("="*50 + "\n")
-        deals = sorted(deals, key=lambda x: (x.get("comparePrice", 0) - x.get("price", 0)), reverse=True)[:5]
-        for i, deal in enumerate(deals, 1):
-            name = deal.get("name")
-            price = deal.get("price")
-            old_price = deal.get("comparePrice")
-            unit = deal.get("unit", "")
-            was = f" (var {old_price} kr{unit})" if old_price > price else ""
-            f.write(f"{i}. {name} - {price} kr{unit}{was}\n")
-    print(f"Sparat till: {filename}")
+        filename = f"ica_erbjudanden_vecka{week}_{year}.txt"
+
+    with open(filename, "w", encoding="utf-8") as f:
+        week = datetime.now().isocalendar()[1]
+        f.write(f"ICA Erbjudanden — Vecka {week} {datetime.now().year}\n")
+        f.write(f"Hämtad: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+        f.write("=" * 50 + "\n\n")
+
+        for store_name, offers in all_results.items():
+            f.write(f"{store_name}\n")
+            f.write("-" * len(store_name) + "\n")
+
+            if not offers:
+                f.write("Inga erbjudanden hittade.\n\n")
+                continue
+
+            sorted_offers = sorted(offers, key=calculate_savings, reverse=True)[:5]
+            for i, offer in enumerate(sorted_offers, 1):
+                name = offer.get("name", "?")
+                price = offer.get("price", "?")
+                compare = offer.get("compare_price")
+                unit = offer.get("unit", "")
+                was_str = f" (ord. {compare} kr)" if compare and compare > price else ""
+                f.write(f"{i}. {name}: {price} kr{unit}{was_str}\n")
+            f.write("\n")
+
+    print(f"\nSparat till: {filename}")
+    return filename
+
+
+def select_store():
+    """Interactive menu to select a store."""
+    print("\nVälj stad:")
+    cities = list(SKANE_STORES.keys())
+    for i, city in enumerate(cities, 1):
+        print(f"{i}. {city}")
+
+    try:
+        city_choice = int(input("\n> ")) - 1
+        city = cities[city_choice]
+    except (ValueError, IndexError):
+        print("Ogiltigt val.")
+        return None, None
+
+    print(f"\nButiker i {city}:")
+    stores = list(SKANE_STORES[city].items())
+    for i, (name, _) in enumerate(stores, 1):
+        print(f"{i}. {name}")
+
+    try:
+        store_choice = int(input("\n> ")) - 1
+        store_name, store_id = stores[store_choice]
+        return store_name, store_id
+    except (ValueError, IndexError):
+        print("Ogiltigt val.")
+        return None, None
+
 
 def main():
-    print("+--------------------------------------------------+")
-    print("| ICA PRICE WATCHER v2.2 – Skåne & Hela Sverige!  |")
-    print("+--------------------------------------------------+\n")
+    print("+------------------------------------------+")
+    print("|  ICA Price Watcher — Skåne               |")
+    print("+------------------------------------------+\n")
 
     print("Välj läge:")
-    print("1. En specifik butik i en ort (t.ex. Lund)")
-    print("2. Alla butiker i Skåne (ca 150 st – tar tid!)")
-    print("3. Alla i Sverige (ca 1300 st – långsamt, använd med försiktighet)")
-    
-    choice = input("\nDitt val (1/2/3): ").strip()
-    
+    print("1. En specifik butik")
+    print("2. Alla butiker i en stad")
+    print("3. Alla butiker i Skåne (tar ett tag)")
+
+    choice = input("\n> ").strip()
+
+    all_results = {}
+
     if choice == "1":
-        city = input("Välj ort i Skåne (t.ex. lund, malmo): ").strip().lower()
-        if city not in SKANE_STORES:
-            print("Ort inte hittad i Skåne. Lägg till fler i koden!")
+        store_name, store_id = select_store()
+        if not store_name:
             return
-        print(f"\nButiker i {city.capitalize()}:")
-        for num, store in SKANE_STORES[city].items():
-            print(f"{num}. {store['name']}")
-        subchoice = input("\nVälj nummer: ").strip()
-        if subchoice in SKANE_STORES[city]:
-            selected = SKANE_STORES[city][subchoice]
-            print(f"\nScraping {selected['name']}... ", end="")
-            deals = get_ica_deals(selected["id"])
-            print("done")
-            print_top_deals(deals, selected['name'])
-            filename = f"ica_deals_{selected['id']}.txt"
-            save_to_file(deals, selected['name'], filename)
-    
+
+        print(f"\nHämtar erbjudanden för {store_name}...")
+        offers = get_offers_for_store(store_id, store_name)
+        all_results[store_name] = offers
+        print_offers(offers, store_name)
+
     elif choice == "2":
-        all_stores = get_all_skanne_stores()
-        print(f"\nHittade {len(all_stores)} butiker i Skåne. Scrapar alla... (detta tar ~1-2 min)")
-        summary_deals = {}  # Sammanställ top deals per butik
-        for key, store in all_stores.items():
-            print(f"Scraping {store['name']}... ", end="")
-            deals = get_ica_deals(store["id"])
-            if deals:
-                best_deal = max(deals, key=lambda x: (x.get("comparePrice", 0) - x.get("price", 0)))
-                summary_deals[store['name']] = best_deal
-            print("done")
-        # Spara sammanställning
-        filename = f"ica_skanne_summary_v{datetime.now().isocalendar()[1]}.txt"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"Top deals från alla ICA-butiker i Skåne – Vecka {datetime.now().isocalendar()[1]} {datetime.now().year}\n")
-            f.write("="*60 + "\n")
-            for name, deal in summary_deals.items():
-                price = deal.get("price", 0)
-                unit = deal.get("unit", "")
-                f.write(f"{name}: {deal.get('name')} - {price} kr{unit}\n")
-        print(f"\nSammanställning sparad till: {filename}")
-        print("Exempel på top deals från Skåne:")
-        for i, (name, deal) in enumerate(list(summary_deals.items())[:10], 1):  # Visa 10 exempel
-            price = deal.get("price", 0)
-            unit = deal.get("unit", "")
-            print(f"{i}. {name}: {deal.get('name')} - {price} kr{unit}")
-    
+        print("\nVälj stad:")
+        cities = list(SKANE_STORES.keys())
+        for i, city in enumerate(cities, 1):
+            print(f"{i}. {city}")
+
+        try:
+            city_choice = int(input("\n> ")) - 1
+            city = cities[city_choice]
+        except (ValueError, IndexError):
+            print("Ogiltigt val.")
+            return
+
+        print(f"\nHämtar erbjudanden för alla butiker i {city}...")
+        for store_name, store_id in SKANE_STORES[city].items():
+            print(f"  {store_name}... ", end="", flush=True)
+            offers = get_offers_for_store(store_id, store_name)
+            all_results[store_name] = offers
+            print(f"{len(offers)} erbjudanden")
+            time.sleep(0.5)  # be nice to their servers
+
+        for name, offers in all_results.items():
+            print_offers(offers, name)
+
     elif choice == "3":
-        print("För hela Sverige: Använd ICA:s fulla butiks-API[](https://www.ica.se/api/stores). Lägg till i koden!")
-        print("Det blir ~1300 butiker – kör på en server för att undvika timeout.")
-        # TODO: Implementera full Sverige-lista här
-    
+        print("\nHämtar erbjudanden för alla butiker i Skåne...")
+        for city, stores in SKANE_STORES.items():
+            print(f"\n{city}:")
+            for store_name, store_id in stores.items():
+                print(f"  {store_name}... ", end="", flush=True)
+                offers = get_offers_for_store(store_id, store_name)
+                all_results[store_name] = offers
+                print(f"{len(offers)} erbjudanden")
+                time.sleep(0.5)
+
+        # Print top deal per store
+        print("\n--- Bästa erbjudande per butik ---")
+        for store_name, offers in all_results.items():
+            if offers:
+                best = max(offers, key=calculate_savings)
+                savings = calculate_savings(best)
+                savings_str = f" (spara {savings:.0f} kr)" if savings > 0 else ""
+                print(f"{store_name}: {best['name']} — {best['price']} kr{savings_str}")
     else:
-        print("Ogiltigt val!")
-    
+        print("Ogiltigt val.")
+        return
+
+    if all_results:
+        save = input("\nSpara till fil? (j/n): ").strip().lower()
+        if save == "j":
+            save_to_file(all_results)
+
     input("\n> Tryck Enter för att avsluta...")
+
 
 if __name__ == "__main__":
     main()
